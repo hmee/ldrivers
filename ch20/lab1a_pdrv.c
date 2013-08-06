@@ -3,9 +3,9 @@
 #include <linux/init.h>		/* Needed for the macros */
 #include <linux/fs.h>		/* Needed for register chrdev */
 #include <linux/cdev.h>		/* cdev machros */
-#include <linux/semaphore.h>
+//#include <linux/mutex.h>
+#include <linux/workqueue.h>
 #include <linux/interrupt.h>
-#include <linux/smp.h>      /* smp_processor_id() */
 
 #define DEV_NAME    "lab1_pdrv"
 #define MAJOR_NUM   700
@@ -14,18 +14,30 @@
 
 struct cdev *mycdev;
 
-#define BUF_SIZE 4
+//#define TRY_DELAYED_WORK
+
+#define BUF_SIZE 20
 
 struct data_t {
     int num[BUF_SIZE];
     int r_ptr;  // index of the next read
     int w_ptr;  // index of the next write
+#ifdef TRY_DELAYED_WORK
+    struct delayed_work mywork;
+#else
+    struct work_struct mywork;
+#endif
 } irq_data;
 
-static void tasklet_func(unsigned long);
+//#ifdef TRY_DELAYED_WORK
+//static void work_func(struct delayed_work *);
+//#else
+static void work_func(struct work_struct *);
+//#endif
 
-DECLARE_TASKLET(mytasklet, tasklet_func, (unsigned int) &irq_data);
+//DEFINE_MUTEX(wq_mutex);
 
+//DECLARE_WORK(mywork, work_func);
 
 irqreturn_t irq_handler(int irq, void *dev_id)
 {
@@ -38,20 +50,34 @@ irqreturn_t irq_handler(int irq, void *dev_id)
     irq_data.w_ptr = tmp % BUF_SIZE;
 
 	printk(KERN_INFO "Device %s IRQ fired (%d)", DEV_NAME, count++);
-    tasklet_schedule( &mytasklet );
+#ifdef TRY_DELAYED_WORK
+    schedule_delayed_work(&irq_data.mywork, HZ >> 2);   // 1/4
+#else
+    schedule_work( &irq_data.mywork );
+#endif
     return IRQ_HANDLED;
 }
 
-static void tasklet_func(unsigned long d)
+//#ifdef TRY_DELAYED_WORK
+//static void work_func(struct work_struct *w)
+//#else
+static void work_func(struct work_struct *w)
+//#endif
 {
     static int count = 0;
-    struct data_t *data = (struct data_t *) d;
-    printk(KERN_INFO "Entering tasklet (%d) [cpu %d]", count, smp_processor_id());
+    // get pointer to data_t from ptr to work in the same struct
+#ifdef TRY_DELAYED_WORK
+    struct delayed_work *dw = container_of(w, struct delayed_work, work);
+    struct data_t *data = container_of(dw, struct data_t, mywork);
+#else
+    struct data_t *data = container_of(w, struct data_t, mywork);
+#endif
+    printk(KERN_INFO "Queued work:\n");
     while ( data->r_ptr !=  data->w_ptr ) {
-        printk(KERN_INFO "Tasklet fired (%d) got num = %d\n", count, data->num[data->r_ptr]);
+        printk(KERN_INFO "Queued work fired (%d) got num = %d\n", count, data->num[data->r_ptr]);
         data->r_ptr++;
         data->r_ptr %= BUF_SIZE;
-        mdelay(30);     // try delay
+        msleep(30);
     }
     count++;
 }
@@ -77,6 +103,12 @@ static int __init lab1_init(void)
                 );
 
     irq_data.r_ptr = irq_data.w_ptr = 0;
+
+#ifdef TRY_DELAYED_WORK
+    INIT_DELAYED_WORK(&irq_data.mywork, work_func);
+#else
+    INIT_WORK(&irq_data.mywork, work_func);
+#endif
 
     if(rt != 0)
         printk(KERN_INFO "Device %s failed to request IRQ(rt = %d)", DEV_NAME, rt);
