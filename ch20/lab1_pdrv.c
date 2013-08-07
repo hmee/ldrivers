@@ -52,6 +52,7 @@ static void tasklet_func(unsigned long d)
         data->r_ptr++;
         data->r_ptr %= BUF_SIZE;
         mdelay(30);     // try delay
+       ////???? tasklet_kill(&mytasklet);           // kill any pending of mytasklet
     }
     count++;
 }

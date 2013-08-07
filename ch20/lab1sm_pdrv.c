@@ -3,9 +3,10 @@
 #include <linux/init.h>		/* Needed for the macros */
 #include <linux/fs.h>		/* Needed for register chrdev */
 #include <linux/cdev.h>		/* cdev machros */
-//#include <linux/mutex.h>
-#include <linux/workqueue.h>
+#include <linux/semaphore.h>
 #include <linux/interrupt.h>
+#include <linux/kthread.h>
+#include <linux/smp.h>      /* smp_processor_id() */
 
 #define DEV_NAME    "lab1_pdrv"
 #define MAJOR_NUM   700
@@ -13,31 +14,17 @@
 #define COUNT       1
 
 struct cdev *mycdev;
+struct task_struct *task;
+struct semaphore sem;
 
-//#define TRY_DELAYED_WORK
-
-#define BUF_SIZE 20
+#define BUF_SIZE 4
 
 struct data_t {
     int num[BUF_SIZE];
     int r_ptr;  // index of the next read
     int w_ptr;  // index of the next write
-#ifdef TRY_DELAYED_WORK
-    struct delayed_work mywork;
-#else
-    struct work_struct mywork;
-#endif
 } irq_data;
 
-//#ifdef TRY_DELAYED_WORK
-//static void work_func(struct delayed_work *);
-//#else
-static void work_func(struct work_struct *);
-//#endif
-
-//DEFINE_MUTEX(wq_mutex);
-
-//DECLARE_WORK(mywork, work_func);
 
 irqreturn_t irq_handler(int irq, void *dev_id)
 {
@@ -50,36 +37,37 @@ irqreturn_t irq_handler(int irq, void *dev_id)
     irq_data.w_ptr = tmp % BUF_SIZE;
 
 	printk(KERN_INFO "Device %s IRQ fired (%d)", DEV_NAME, count++);
-#ifdef TRY_DELAYED_WORK
-    schedule_delayed_work(&irq_data.mywork, HZ >> 2);   // 1/4
-#else
-    schedule_work( &irq_data.mywork );
-#endif
+    // put the sempahore
+    up(&sem);
+
     return IRQ_HANDLED;
 }
 
-//#ifdef TRY_DELAYED_WORK
-//static void work_func(struct work_struct *w)
-//#else
-static void work_func(struct work_struct *w)
-//#endif
+static int kthread_func(void * d)
 {
     static int count = 0;
-    // get pointer to data_t from ptr to work in the same struct
-#ifdef TRY_DELAYED_WORK
-    struct delayed_work *dw = container_of(w, struct delayed_work, work);
-    struct data_t *data = container_of(dw, struct data_t, mywork);
-#else
-    struct data_t *data = container_of(w, struct data_t, mywork);
-#endif
-    printk(KERN_INFO "Queued work:\n");
-    while ( data->r_ptr !=  data->w_ptr ) {
-        printk(KERN_INFO "Queued work fired (%d) got num = %d\n", count, data->num[data->r_ptr]);
+    struct data_t *data = (struct data_t *) d;
+    printk(KERN_INFO "Start the kernel thread [cpu %d]\n", smp_processor_id());
+
+
+    while(1) {
+        // wait for up that happens in ISR
+        down(&sem);
+
+        if(kthread_should_stop()) {
+            break;
+        }
+
+        printk(KERN_INFO "Tasklet fired (%d) got num = %d\n", count, data->num[data->r_ptr]);
         data->r_ptr++;
         data->r_ptr %= BUF_SIZE;
-        msleep(50);
-    }
-    count++;
+        mdelay(30);     // try delay
+        count++;
+    };
+
+    printk(KERN_INFO "End of the kernel thread\n");
+
+    return 0;
 }
 
 struct file_operations fops = {
@@ -104,12 +92,13 @@ static int __init lab1_init(void)
 
     irq_data.r_ptr = irq_data.w_ptr = 0;
 
-#ifdef TRY_DELAYED_WORK
-    INIT_DELAYED_WORK(&irq_data.mywork, work_func);
-#else
-    INIT_WORK(&irq_data.mywork, work_func);
-#endif
+    // init the semaphore in locked state
+    sema_init(&sem, 0);
 
+    // TODO: creat and start kernel_thread here
+    task = kthread_create(kthread_func, (void *) &irq_data, "pdrv_thread");
+    wake_up_process(task);  // let it run
+    
     if(rt != 0)
         printk(KERN_INFO "Device %s failed to request IRQ(rt = %d)", DEV_NAME, rt);
 
@@ -123,6 +112,9 @@ static void __exit lab1_exit(void)
     cdev_del(mycdev);
 
     free_irq(19, (void *) &irq_data);
+    // TODO: end kernel_thread here
+    up(&sem);   // to make the thread proceed
+    kthread_stop(task);
 
 	printk(KERN_INFO "Device is unregisterd\n");
 }

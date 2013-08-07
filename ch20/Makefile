@@ -1,4 +1,4 @@
-NAME = lab1a_pdrv
+NAME = lab1sm_pdrv
 
 obj-m += $(NAME).o
 
